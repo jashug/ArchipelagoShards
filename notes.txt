@@ -36,12 +36,21 @@ Assign each slot to a shard (for a first stab, do round robin) (So this can actu
 ! Make list of foreign items and foreign locations for each shard (equal number by graph theory, needed to define proxy game)
 For safety's sake, check that p * (num_items + 2) <= 2**50 or so to avoid running into the id upper bound,
   but this is not really possible.
-Proxy game has n locations and n items. Assign ids cleverly, so that each shard #k has locations (p * i + k),
+Proxy game has n locations and n items. Assign ids cleverly, so that each shard #k has locations (p * i + k + 1),
 and item ids have the id of the linked location.
-(This allows the proxy to recieve item p * i + k, and immediately know to check location p * i + k which is in shard k)
+(This allows the proxy to receive item p * i + k + 1, and immediately know to check location p * i + k + 1 which is in shard k)
 The locations table does the rest of the mapping.
 Proxies just need to know which shard each connection is. Put it in slot_data.
 
 Hints:
 We want to relay hints as well, and it looks like we can do that using the CreateHints packet.
 Hint cost is only checked on Say("!hint") packets.
+
+Proxy Client:
+Room info contains seed_name, use to verify that all shards are consistent
+Slot data will contain { 'num_shards': int, 'shard_index': int }, 'shard_index' is zero-indexed (so from 0 to num_shards - 1)
+Connect to first shard, get 'num_shards', ask for remaining num_shards - 1 shards' connection info.
+When receiving item with id n, immediately check location n in shard ((n - 1) % num_shards).
+Other than hints (which might be a bit complicated? Use 'CreateHints' packet), that is all the client needs to do.
+Don't forward 'PrintJSON' packets to reduce broadcast clutter. (Set 'NoText' tag to not even receive them)
+Don't need the data package either unless hints need it.
