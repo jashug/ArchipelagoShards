@@ -11,7 +11,28 @@ and an item for each location that has an item that needs to be sent to another 
 Then we have one proxy client that connects to all of the servers (but only one connection to each, not one per player),
 and plays the proxy games by relaying checks.
 
----
+# Installation
+
+Once I have something working, I will release an `.apworld` that can be installed and used more easily.
+
+## Development Setup
+
+Put this repository as a folder named `shards` in `C:\ProgramData\Archipelago\lib\worlds` (Or wherever your Archipelago data is already installed).
+I'm currently running from the command line (on Windows) with `\ProgramData\Archipelago\ArchipelagoLauncherDebug.exe "Generate Shards" --`,
+and I set up settings in my `host.yaml`:
+```yaml
+shards_options:
+  loglevel: "debug"
+  number_of_shards: 3
+  multidata: "C:\\ProgramData\\Archipelago\\output\\AP_26392360222573641375.zip"
+```
+You will need to change the `multidata` setting to a generated archipelago you want to test with.
+These settings can also be given on the command line, run the program with `--help` to see details.
+
+I know I should set up type checking, but I'm not sure how to get types for the `Archipelago` libraries that
+this is being used as a plugin with.
+
+# Notes
 
 Inspired by the failure of the first Cjya community archipelago where 1200 sync players were too much for the server.
 That was hosted on `archipelago.gg`, beefier hardware on a dedicated server might or might not be able to handle
