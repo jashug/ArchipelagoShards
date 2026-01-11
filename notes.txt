@@ -1,0 +1,43 @@
+Split players up evenly, create a proxy game for each shard, name it "Someone" or maybe "X".
+The proxy game only needs to have foreign items found within the shard, and foreign locations
+with items for the shard. This only doubles the total number of checks, while dividing
+the number of checks per shard by n/2, and number of players per shard is divided by n.
+Thus also broadcast fanout is divided by n/2 effectively (since checks get broadcast for both sender and receiver).
+
+Have one proxy connected to all of the shards at once, that plays the proxy games by strategy stealing.
+
+How this plays out
+When someone gets a check, they send it to their shard (normal),
+Shard broadcasts a text update
+Shard sends a ReceivedItems packet to the proxy
+Proxy gets the text packet, ignores it, gets the ReceivedItems packet.
+Proxy sends a LocationChecks packet to the other shard
+Other shard gets the packet, broadcasts its own (local) text update, and sends a ReceivedItems packet to the recipient.
+
+Cuts down on a lot of broadcast noise, lets you use separate servers for each shard.
+
+Can skip receiving the text broadcast with the "NoText" tag on the proxy.
+
+Probably want to use at least 4 shards always, but this should scale pretty well.
+Starts to break down only when there are enough players sending checks that one proxy can't keep up.
+If that ever happened, could use multiple proxies, each of which has to send to all shards
+but only receives checks from some.
+
+Put shard number in slot data (or something like that), and also double check with names?
+
+Leaks a little bit of information about how many checks are local to the shard.
+I don't know how race mode works, so it probably won't just work with this (proably fixable).
+Assert that all teams are == 0
+
+Splitting in to shards algorithm:
+Know number of shards (=p).
+Get number of slots.
+Assign each slot to a shard (for a first stab, do round robin) (So this can actually happen without getting a list of slots, just %n)
+! Make list of foreign items and foreign locations for each shard (equal number by graph theory, needed to define proxy game)
+For safety's sake, check that p * (num_items + 2) <= 2**50 or so to avoid running into the id upper bound,
+  but this is not really possible.
+Proxy game has n locations and n items. Assign ids cleverly, so that each shard #k has locations (p * i + k),
+and item ids have the id of the linked location.
+(This allows the proxy to recieve item p * i + k, and immediately know to check location p * i + k which is in shard k)
+The locations table does the rest of the mapping.
+Proxies just need to know which shard each connection is. Put it in slot_data.
