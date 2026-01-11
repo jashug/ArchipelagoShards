@@ -41,3 +41,7 @@ and item ids have the id of the linked location.
 (This allows the proxy to recieve item p * i + k, and immediately know to check location p * i + k which is in shard k)
 The locations table does the rest of the mapping.
 Proxies just need to know which shard each connection is. Put it in slot_data.
+
+Hints:
+We want to relay hints as well, and it looks like we can do that using the CreateHints packet.
+Hint cost is only checked on Say("!hint") packets.
