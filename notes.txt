@@ -54,3 +54,4 @@ When receiving item with id n, immediately check location n in shard ((n - 1) % 
 Other than hints (which might be a bit complicated? Use 'CreateHints' packet), that is all the client needs to do.
 Don't forward 'PrintJSON' packets to reduce broadcast clutter. (Set 'NoText' tag to not even receive them)
 Don't need the data package either unless hints need it.
+Should mark goal when one shard has all goaled.

@@ -9,7 +9,7 @@ import colorama
 import NetUtils
 import Utils
 from Utils import output_path, restricted_dumps, restricted_loads
-from NetUtils import MultiData
+from NetUtils import Hint, MultiData, NetworkSlot, SlotType
 
 ARCHIPELAGO_DATA_VERSION = 3
 
@@ -46,8 +46,10 @@ def write_shard(data: MultiData, shard_index: int):
     logging.info(f"Finished writing {filename}.")
 
 PROXY_SLOT = 1
+ONLY_TEAM = 0
 
-def split_multidata(data: MultiData, num_shards: int) -> list[MultiData]:
+def split_multidata(data: MultiData, num_shards: int, proxy_slot_name: str) -> list[MultiData]:
+    assert num_shards > 0
     # Shards will be numbered 0 - (num_shards - 1)
     slot_ids = sorted(data["slot_info"].keys())
     assert slot_ids
@@ -60,40 +62,184 @@ def split_multidata(data: MultiData, num_shards: int) -> list[MultiData]:
     # Distribute slots round-robin among shards
     # Round-robin is nice because it is deterministic, simple, and should
     # break up clumps.
-    def map_slot(slot: int) -> (int, int):
+    def map_slot(slot: int) -> tuple[int, int]:
         """Returns (shard, slot)"""
         base_slot, shard = divmod(slot - 1, num_shards)
         return (shard, base_slot + 2)
 
+    # shard_slots[shard_ix][input_slot] = shard_local_slot
+    shard_slots: list[dict[int, int]] = [{} for slot in range(1, num_slots + 1)]
+    for slot in range(1, num_slots + 1):
+        (shard, new_slot) = map_slot(slot)
+        shard_slots[shard][slot] = new_slot
+    # We use both map_slot and shard_slots: they need to be consistent
+
     # Our item and location ids will be chosen cleverly.
     # Must be integers > 0 for Archipelago protocol.
-    # For the i-th (0-indexed) item in shard r which is found in a location in a different shard,
-    # we create a location (i * num_shards + r + 1) in the proxy for shard r and an item with the same id
-    # in the other shard.
-    shard_counters = [0 for i in range(num_shards)]
-    # map from (slot, id) to (slot, proxy id). If the item/location and it's pair are both in the
-    # same shard, this is the identity map.
-    # translate_items[(x, y)] gives the proxy item in the shard where item (x, y) is found.
-    translate_items: dict[(int, int), (int, int)] = {}
-    # translate_locations[(x, y)] gives the proxy location in the shard that location (x, y) sends to.
-    translate_locations: dict[(int, int), (int, int)] = {}
+    # For the i-th (1-indexed) item in shard r which is found in a location in shard s,
+    # we create an id (i * num_shards ** 2 + s * num_shards + r) in the proxy games for shards r and s
+    base = num_shards ** 2
+    shard_counters = [1 for i in range(base)]
+    # map from shard# to input (slot, id) to output (slot, id).
+    # When generating multidata for the given shard, replace all instances of the input
+    # item/location with the mapped value.
+    translate_items: dict[int, dict[tuple[int, int], tuple[int, int]]] = {}
+    translate_locations: dict[int, dict[tuple[int, int], tuple[int, int]]] = {}
 
-    # TODO: I can't follow the translation logic on this little sleep.
-    # Figure out what works consistently. Maybe work backwards, try the generation and see what you need.
+    # sharded_locations[shard][slot][location_id] = (item_id, item_slot, item_flags)
+    sharded_locations: list[dict[int, dict[int, (int, int, int)]]] = \
+                       [{PROXY_SLOT: {}} for shard_ix in range(num_shards)]    
+
     for location_slot, slot_locations in data["locations"].items():
-        for location_id, (item_id, item_slot, _item_flags) in slot_locations.items():
-            assert (location_slot, location_id) not in translate_locations
-            assert (item_slot, item_id) not in translate_items
-            location_shard, location_new_slot = map_slot(location_slot)
+        location_shard, location_new_slot = map_slot(location_slot)
+        assert location_new_slot not in sharded_locations[location_shard]
+        sharded_locations[location_shard][location_new_slot] = {}
+        for location_id, (item_id, item_slot, item_flags) in slot_locations.items():
             item_shard, item_new_slot = map_slot(item_slot)
             if location_shard == item_shard:
-                translate_items[(item_slot, item_id)] = (item_slot, item_id)
-                translate_locations[(location_slot, location_id)] = (location_slot, location_id)
+                both_shard = item_shard
+                translate_items[both_shard][(item_slot, item_id)] = (item_new_slot, item_id)
+                translate_locations[both_shard][(location_slot, location_id)] = (location_new_slot, location_id)
+                sharded_locations[both_shard][location_new_slot][location_id] = (item_id, item_new_slot, item_flags)
             else:
-                new_id = shard_counters[item_shard] * num_shards + item_shard + 1
-                shard_counters[item_shard] += 1
-                translate_items[(item_slot, item_id)] = (PROXY_SLOT, new_id)
-                translate_locations[(location_slot, location_id)] = (PROXY_SLOT, new_id)
+                counter_ix = location_shard * num_shards + item_shard
+                new_id = shard_counters[counter_ix] * base + counter_ix
+                shard_counters[counter_ix] += 1
+                translate_items[item_shard][(item_slot, item_id)] = (item_new_slot, item_id)
+                translate_items[location_shard][(item_slot, item_id)] = (PROXY_SLOT, new_id)
+                translate_locations[item_shard][(location_slot, location_id)] = (PROXY_SLOT, new_id)
+                translate_locations[location_shard][(location_slot, location_id)] = (location_new_slot, location_id)
+                sharded_locations[item_shard][PROXY_SLOT][new_id] = (item_id, item_new_slot, item_flags)
+                sharded_locations[location_shard][location_new_slot][location_id] = (new_id, PROXY_SLOT, item_flags)
+
+    sharded_slot_data = [{"num_shards": num_shards, "shard_index": shard_ix} for shard_ix in range(num_slots)]
+    for slot, data in data["slot_data"].items():
+        shard, new_slot = map_slot(slot)
+        sharded_slot_data[shard][new_slot] = data
+
+    sharded_slot_info = [{PROXY_SLOT: proxy_slot_info} for shard_ix in range(num_slots)]
+    for slot, info in data["slot_info"].items():
+        shard, new_slot = map_slot(slot)
+        sharded_slot_info[shard][new_slot] = info
+
+    # Generate shard MultiData
+
+    proxy_slot_info = NetworkSlot(name=proxy_slot_name, game="Shard Proxy", type=SlotType.player)
+
+    sharded_connect_names: list[dict[str, tuple[int, int]]] = \
+                           [{proxy_slot_name, (ONLY_TEAM, PROXY_SLOT)} for shard_ix in range(num_shards)]
+    for name, (team, slot) in data["connect_names"].items():
+        assert team == ONLY_TEAM
+        assert name != proxy_slot_name
+        shard, new_slot = map_slot(slot)
+        sharded_connect_names[shard][name] = (team, new_slot)
+
+    # ignore checks_in_area[PROXY_SLOT] for the moment, TODO: should be possible
+    sharded_checks_in_area = [{}]
+    for slot, areas in data["checks_in_area"].items():
+        shard, new_slot = map_slot(slot)
+        sharded_checks_in_area[shard][new_slot] = areas
+
+    if data["server_options"]["port"] is not None:
+        logging.warning("Port is included in multidata: must override when hosting")
+
+    if data["server_options"]["savefile"] is not None:
+        logging.warning("Save file is included in multidata: danger of shards competing for one save file")
+
+    # sharded_er_hint_data[shard][slot][location_id]
+    input_er_hint_data = data["er_hint_data"]
+    sharded_er_hint_data = [{PROXY_SLOT: {}} for shard_ix in range(num_shards)]
+    for location_slot, slot_er_hint_data in data["er_hint_data"].items():
+        location_shard, new_location_slot = map_slot(location_slot)
+        for location_id, hint in slot_er_hint_data.items():
+            sharded_er_hint_data[location_shard].setdefault(new_location_slot, {})[location_id] = hint
+            item_id, item_slot, _item_flags = data["locations"][slot][location_id]
+            item_shard, new_item_slot = map_slot(item_slot)
+            if item_shard != location_shard:
+                proxy_location_slot, proxy_id = translate_item[(item_slot, item_id)]
+                assert proxy_location_slot == PROXY_SLOT
+                sharded_er_hint_data[item_shard][PROXY_SLOT][proxy_id] = hint
+
+    sharded_precollected_items = [{} for shard_ix in range(num_shards)]
+    for slot, items in data["precollected_items"].items():
+        shard, new_slot = map_slot(slot)
+        sharded_precollected_items[shard][new_slot] = items
+
+    sharded_precollected_hints = [{PROXY_SLOT: set()} for shard_ix in range(num_shards)]
+    for slot, hints in data["precollected_hints"].items():
+        shard, new_slot = map_slot(slot)
+        new_hints = set()
+        sharded_precollected_hints[shard][new_slot] = new_hints
+        for hint in hints:
+            receiving_shard, receiving_new_slot = map_slot(hint.receiving_player)
+            finding_shard, finding_new_slot = map_slot(hint.finding_player)
+            assert slot == hint.receiving_player or slot == hint.finding_player
+            if receiving_shard == finding_shard:
+                new_hints.add(Hint(
+                    receiving_new_slot,
+                    finding_new_slot,
+                    hint.location,
+                    hint.item,
+                    hint.found,
+                    hint.entrance,
+                    hint.item_flags,
+                    hint.status,
+                ))
+            else:
+                # TODO: Go over this again, I feel like I made a mistake somewhere
+                new_location_slot, new_location_id = translate_locations[receiving_shard][(hint.finding_player, hint.location)]
+                assert new_location_slot == PROXY_SLOT 
+                sharded_precollected_hints[receiving_shard][receiving_new_slot].add(Hint(
+                    receiving_new_slot,
+                    new_location_slot,
+                    new_location_id,
+                    hint.item,
+                    hint.found,
+                    hint.entrance,
+                    hint.item_flags,
+                    hint.status,
+                ))
+                new_item_slot, new_item_id = translate_items[finding_shard][(hint.receiving_player, hint.item)]
+                assert new_item_slot == PROXY_SLOT
+                sharded_precollected_hints[finding_shard][finding_new_slot].add(Hint(
+                    new_item_slot,
+                    finding_new_slot,
+                    hint.location,
+                    new_item_id,
+                    hint.found,
+                    hint.entrance,
+                    hint.item_flags,
+                    hint.status,
+                ))
+
+    def translate_sphere(shard_ix: int, sphere: dict[int, set[int]]):
+        new_sphere = {}
+        for slot, items in sphere.items():
+            for item_id in items:
+                new_slot, new_item_id = translate_item[(slot, item_id)]
+                new_sphere.setdefault(new_slot, set()).add(new_item_id)
+    sharded_spheres = [[translate_sphere(shard_ix, sphere) for sphere in data["spheres"]] for shard_ix in range(num_shards)]
+
+    for shard_ix in range(num_shards):
+        multidata: MultiData = {
+            "slot_data": sharded_slot_data[shard_ix],
+            "slot_info": sharded_slot_info[shard_ix],
+            "connect_names": sharded_connect_names[shard_ix],
+            "locations": sharded_locations[shard_ix],
+            "checks_in_area": sharded_checks_in_area[shard_ix],
+            "server_options": data["server_options"],
+            "er_hint_data": sharded_er_hint_data[shard_ix],
+            "precollected_items": sharded_precollected_items[shard_ix],
+            "precollected_hints": sharded_precollected_hints[shard_ix],
+            "version": data["version"],
+            "tags": data["tags"] + ["Shards"],
+            "minimum_versions": data["minimum_versions"],
+            "seed_name": data["seed_name"],
+            "spheres": [translate_sphere(shard_ix, sphere) for sphere in data["spheres"]],
+            "datapackage": data["datapackage"],
+            "race_mode": data["race_mode"], # TODO: investigate race_mode
+        }
+        write_shard(multidata, shard_ix)
 
 def get_multidata_filename(data_filename: str | None=None):
     # Mimic MultiServer for opening the .archipelago file

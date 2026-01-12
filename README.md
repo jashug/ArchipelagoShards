@@ -58,5 +58,6 @@ This approach doesn't need to change the archipelago server at all, which is ver
 Current status:
 - Strategy sketched out (see `notes.txt`)
 - Started work on the program to split an `.archipelago` file
+  - Splitting algorithm done in principle, need to work through typos, and then test.
 - Proxy client not yet started
   - Proxy client hint forwarding (get basic check forwarding working first)
